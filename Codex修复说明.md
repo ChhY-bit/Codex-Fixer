@@ -1,6 +1,6 @@
 # Codex 一站式修复工具说明
 
-> Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
+Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
 
 > ## ⚠️ 核心原则：会话绑定模型，切走即失效
 >
