@@ -76,6 +76,18 @@
 
 脚本选项 5 集成了流程 1+2（检测到 elevated 时询问是否切换 unelevated）。
 
+### 问题 7：切回官方后，国产模型的旧对话打不开，提示 "Model provider `custom` not found"
+
+**根因**：Codex 会话在创建时就绑定了当时的 `model_provider` id（第三方模式下 cc-switch 写入的是 `custom`）。切回官方时，cc-switch 会把 `config.toml` 中的 `[model_providers.custom]` 段整体删除（替换为 `[model_providers.cc-switch-official]`），绑定第三方 provider 的旧会话加载时找不到定义，即报 "ChatGPT 无法加载 config.toml ... Model provider `custom` not found"，对话无法打开。
+
+**修复**：在 `config.toml` 末尾补回一个 `[model_providers.custom]` 桩定义，指向 cc-switch 本地代理（`http://127.0.0.1:15721/v1`，代理接管模式下官方/第三方同走此地址），旧对话即可正常打开。
+
+**注意**：
+
+- 打开后可查看/导出历史；**续聊**请求会经 cc-switch 代理转发到**当前激活**的供应商——若当前是官方模式，旧对话续聊需在 cc-switch 中切回对应第三方供应商，否则会因模型不匹配报错；
+- cc-switch 每次切换供应商都会重写 `config.toml` 并删除该段，切回官方后需重跑脚本；
+- 脚本选项 3（切回官方）已自动附带此修复，也可单独运行选项 6。
+
 ## 使用方法
 
 双击 `Codex修复工具.bat`，菜单按使用场景分组：
@@ -91,8 +103,9 @@
  高级:
   [4] 自定义上下文窗口 (默认 256k，报"使用上限"时调小)
   [5] 修复 Agent 沙盒   -- 提示"更新 Agent 沙盒以继续/无法发送"时用
-  [6] 刷新状态
-  [7] 退出
+  [6] 修复旧对话打不开 -- 提示 "Model provider xxx not found" 时用
+  [7] 刷新状态
+  [8] 退出
 ```
 
 主菜单上方会实时显示当前状态（认证模式、上下文窗口、代理变量、账号认证、配置路径），便于确认。
@@ -101,8 +114,9 @@
 
 1. **Codex 无法联网（无论用官方还是第三方模型）** → 运行脚本选 `1` → 重启 Codex（完全退出含托盘）
 2. **官方额度耗尽，切国产模型** → cc-switch 切换 → 运行脚本选 `2`（有确认提示）→ 重启 Codex
-3. **官方额度恢复，切回官方** → cc-switch 切换 → 运行脚本选 `3`（自动恢复官方登录）→ 重启 Codex
+3. **官方额度恢复，切回官方** → cc-switch 切换 → 运行脚本选 `3`（自动恢复官方登录 + 保留旧对话可打开）→ 重启 Codex
 4. **提示"更新 Agent 沙盒以继续/无法发送"** → 运行脚本选 `5` → 重启 Codex
+5. **国产模型的旧对话打不开（Model provider not found）** → 运行脚本选 `6` → 重启 Codex
 
 ### 脚本行为说明
 

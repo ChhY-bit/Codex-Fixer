@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 #  问题 1: 代理环境变量 (HTTP_PROXY / HTTPS_PROXY)
 #  问题 2: requires_openai_auth 认证模式
 #  问题 3: 模型目录 context_window 上下文窗口
+#  问题 7: 切回官方后旧对话 "Model provider custom not found"
 # ============================================================
 
 # ---------- 路径解析（跨平台，无绝对路径硬编码） ----------
@@ -179,6 +180,8 @@ function Show-Status {
         $prov = if ($raw -match 'model_provider\s*=\s*"([^"]+)"') { $Matches[1] } else { '(默认官方)' }
         Write-Host "model_provider : $prov"
         Write-Host "认证模式       : requires_openai_auth = $(if ($auth) { $auth } else { '(未设置，官方原生配置)' })"
+        $legacy = if ($raw -match '(?m)^\[model_providers\.custom\]') { 'custom 已定义' } else { 'custom 缺失 (选6修复)' }
+        Write-Host "旧对话 provider: $legacy"
         $cat = Get-CatalogPath
         if (Test-Path $cat) {
             $j = Read-Raw $cat | ConvertFrom-Json
@@ -198,6 +201,29 @@ function Show-Status {
     }
     else { Write-Host '账号认证       : 无 auth.json' }
     Write-Host '========================================='
+}
+
+# ---------- 问题 7: 旧对话 provider 缺失 ----------
+# 切回官方后，cc-switch 会删除 config.toml 中的 [model_providers.custom] 段，
+# 绑定第三方 provider 的旧会话加载时报 "Model provider `custom` not found"。
+# 修复: 补回一个指向 cc-switch 本地代理的 provider 定义，让旧对话可以打开。
+function Invoke-LegacyProviderFix {
+    param([string]$Id = 'custom')
+    if (-not (Test-Path $configPath)) { Write-Host "[跳过] 找不到 $configPath"; return }
+    $raw = Read-Raw $configPath
+    if ($raw -match ("(?m)^\[model_providers\." + [regex]::Escape($Id) + "\]")) {
+        Write-Host "config.toml 中已存在 [model_providers.$Id]，旧对话应可正常打开。"
+        return
+    }
+    # cc-switch 代理接管模式下官方/第三方同走本地代理，复用现有 provider 的 base_url
+    $proxy = 'http://127.0.0.1:15721/v1'
+    if ($raw -match '(?m)^base_url\s*=\s*"([^"]+)"') { $proxy = $Matches[1] }
+    $section = "[model_providers.$Id]`nname = `"$Id (codex-doctor restored)`"`nrequires_openai_auth = false`nsupports_websockets = false`nwire_api = `"responses`"`nbase_url = `"$proxy`"`n"
+    Write-Raw $configPath ($raw.TrimEnd() + "`n`n" + $section)
+    Write-Host "已补回 [model_providers.$Id] (base_url = $proxy)，旧对话现在可以打开。"
+    Write-Host '  - 打开后可查看/导出历史；续聊请求会经 cc-switch 代理转发到当前激活的供应商，'
+    Write-Host '    若当前是官方模式，旧对话续聊需在 cc-switch 中切回对应第三方供应商。'
+    Write-Host '  - 注意: cc-switch 每次切换供应商都会重写 config.toml，切换后需重跑本项。'
 }
 
 # ---------- 问题 6: Agent 沙盒 ----------
@@ -265,8 +291,9 @@ do {
     Write-Host ' 高级:'
     Write-Host '  [4] 自定义上下文窗口 (默认 256k，报"使用上限"时调小)'
     Write-Host '  [5] 修复 Agent 沙盒   -- 提示"更新 Agent 沙盒以继续/无法发送"时用'
-    Write-Host '  [6] 刷新状态'
-    Write-Host '  [7] 退出'
+    Write-Host '  [6] 修复旧对话打不开 -- 提示 "Model provider xxx not found" 时用'
+    Write-Host '  [7] 刷新状态'
+    Write-Host '  [8] 退出'
     Write-Host ''
     Write-Host ' ! 重要: 会话绑定模型，切走即失效 -- 官方模型的旧对话切国产后无法续用，'
     Write-Host '          请开新对话 (需旧上下文就手动贴关键内容)。详见《Codex修复说明.md》'
@@ -288,15 +315,20 @@ do {
             } else { Write-Host '已取消。' }
             Pause-It
         }
-        '3' { Invoke-AuthFix $true; Pause-It }
+        '3' { Invoke-AuthFix $true; Write-Host ''; Invoke-LegacyProviderFix; Pause-It }
         '4' {
             $v = Read-Host '上下文窗口 token 数 (直接回车 = 262144)'
             if (-not $v) { $v = 262144 }
             Invoke-ContextFix ([int]$v); Pause-It
         }
         '5' { Invoke-SandboxFix; Pause-It }
-        '6' { }
-        '7' { exit }
+        '6' {
+            $id = Read-Host '缺失的 provider id (直接回车 = custom)'
+            if (-not $id) { $id = 'custom' }
+            Invoke-LegacyProviderFix $id; Pause-It
+        }
+        '7' { }
+        '8' { exit }
         default { Write-Host '无效输入'; Pause-It }
     }
 } while ($true)
