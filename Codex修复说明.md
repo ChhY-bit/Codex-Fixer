@@ -1,5 +1,7 @@
 # Codex 一站式修复工具说明
 
+> Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
+
 > ## ⚠️ 核心原则：会话绑定模型，切走即失效
 >
 > **每个对话在创建时就绑定了当时的模型。切换 provider 后，绑定旧模型的会话无法续用：**
