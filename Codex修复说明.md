@@ -24,7 +24,7 @@ Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
 
 两个脚本文件需放在同一目录。脚本不含任何绝对路径硬编码，会自动定位用户目录下的 `.codex` 配置（也支持 `CODEX_HOME` 环境变量），可直接复制到其他设备使用。
 
-## 三个问题及根因
+## 常见问题及根因
 
 ### 问题 1：Codex 无法联网，但浏览器正常
 
@@ -88,6 +88,24 @@ Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
 - cc-switch 每次切换供应商都会重写 `config.toml` 并删除该段，切回官方后需重跑脚本；
 - 脚本选项 3（切回官方）已自动附带此修复，也可单独运行选项 6。
 
+### 问题 8：codex++ 切回官方后，ChatGPT 报 "未能加载账户信息。请检查网络连接后重试。"
+
+**根因**：codex++ 等切换工具切回"OpenAI Official（官方登录）"供应商时，会把 `~/.codex/auth.json` 覆写为空对象 `{}`（或仅剩 `OPENAI_API_KEY` 字段），官方 ChatGPT 登录 token（`id_token` / `access_token` / `refresh_token` / `account_id`）被清掉。桌面版启动读不到账户凭据即报此错——**提示有误导性，并非网络问题**。`config.toml` 通常无残留第三方配置，无需修改。
+
+**排查方法**：查看 `auth.json` 文件大小，2 字节（`{}`）或仅 100+ 字节（只有 API Key）即可确认。
+
+**修复**：切换工具操作时会自动在 `~/.codex/backups/` 下留有备份（codex++ 为 `codex-plus-live-*` 目录，cc-switch 为 `cc-switch-*` 目录），从中选取**最近一份含官方登录 tokens** 的 `auth.json` 恢复即可：
+
+1. 脚本会列出所有备份的时间、大小、类型（官方登录态 / 仅 API Key）；
+2. 自动选取最近一份含 tokens 的备份恢复，恢复前把损坏的现场留存为 `auth.json.broken-<时间戳>.bak`；
+3. 恢复后**完全退出 ChatGPT/Codex（含托盘）再重启**；token 一般会自动续期，过期则重新登录一次。
+
+**注意**：
+
+- 若所有备份均无 tokens（只有 API Key），只能重新进行官方登录；
+- 备份中的 `refresh_token` 有时效（通常数周），备份过旧可能需重新登录；
+- **预防**：只用官方登录时，关闭切换工具里的"启用供应商配置切换"开关（工具自述：关闭后不会在手动切换时写入 Codex 的 `config.toml` / `auth.json`）；脚本菜单选项 7，主菜单状态栏也会实时显示 `auth.json` 健康度。
+
 ## 使用方法
 
 双击 `Codex修复工具.bat`，菜单按使用场景分组：
@@ -104,11 +122,12 @@ Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
   [4] 自定义上下文窗口 (默认 256k，报"使用上限"时调小)
   [5] 修复 Agent 沙盒   -- 提示"更新 Agent 沙盒以继续/无法发送"时用
   [6] 修复旧对话打不开 -- 提示 "Model provider xxx not found" 时用
-  [7] 刷新状态
-  [8] 退出
+  [7] 恢复官方登录     -- 切回官方后 ChatGPT 报"未能加载账户信息"时用
+  [8] 刷新状态
+  [9] 退出
 ```
 
-主菜单上方会实时显示当前状态（认证模式、上下文窗口、代理变量、账号认证、配置路径），便于确认。
+主菜单上方会实时显示当前状态（认证模式、上下文窗口、代理变量、账号认证及 auth.json 健康度、配置路径），便于确认。
 
 ### 日常流程
 
@@ -117,6 +136,7 @@ Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
 3. **官方额度恢复，切回官方** → cc-switch 切换 → 运行脚本选 `3`（自动恢复官方登录 + 保留旧对话可打开）→ 重启 Codex
 4. **提示"更新 Agent 沙盒以继续/无法发送"** → 运行脚本选 `5` → 重启 Codex
 5. **国产模型的旧对话打不开（Model provider not found）** → 运行脚本选 `6` → 重启 Codex
+6. **codex++ 切回官方后报"未能加载账户信息"** → 运行脚本选 `7`（从 codex++ 备份恢复官方登录态）→ 重启 ChatGPT/Codex
 
 ### 脚本行为说明
 
@@ -129,3 +149,4 @@ Clone 地址：https://github.com/ChhY-bit/Codex-Fixer.git
 - 代理可用性验证：直连 `api.openai.com:443` TCP 连接失败；走 `127.0.0.1:7897`（Clash）后 API 返回 401（连接正常，未带令牌的预期响应）
 - 上游容量实测（qwen3.8-flash，间隔单发）：5.5 万字符 17s / 11 万字符 11s / 40 万字符 10s 均成功；早前一次 12 万字符"超时"经复核为瞬时网络故障，并非容量上限
 - cc-switch 本地代理默认监听 `127.0.0.1:15721`，其日志位于 `~/.cc-switch/logs/cc-switch.log`
+- codex++ 切回官方清空 auth.json（2026-11-17 实例）：`auth.json` 由 3936 字节变为 2 字节 `{}`；从 `~/.codex/backups/codex-plus-live-*` 中最近一份含 tokens 的备份（3936 字节）恢复后重启即恢复正常。codex++ 备份目录时间戳为毫秒级 Unix 时间，可据此排序

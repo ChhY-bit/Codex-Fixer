@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 #  问题 2: requires_openai_auth 认证模式
 #  问题 3: 模型目录 context_window 上下文窗口
 #  问题 7: 切回官方后旧对话 "Model provider custom not found"
+#  问题 8: 切回官方后 ChatGPT 报"未能加载账户信息"(auth.json 被清空)
 # ============================================================
 
 # ---------- 路径解析（跨平台，无绝对路径硬编码） ----------
@@ -194,7 +195,15 @@ function Show-Status {
     $authJson = Join-Path $codexHome 'auth.json'
     $backup   = Join-Path $codexHome 'auth.json.official-backup'
     $disabled = Join-Path $codexHome 'auth.json.disabled'
-    if (Test-Path $authJson) { Write-Host '账号认证       : auth.json 生效中' }
+    if (Test-Path $authJson) {
+        $info = Get-AuthJsonInfo $authJson
+        if ($info.HasTokens) { Write-Host '账号认证       : auth.json 生效中 (ChatGPT 官方登录态完整)' }
+        elseif ($info.Mode -eq 'chatgpt') { Write-Host '账号认证       : auth.json 异常 (auth_mode=chatgpt 但缺少 tokens，选 7 修复)' }
+        elseif ($info.IsEmpty) { Write-Host '账号认证       : auth.json 已被清空 ({}，官方登录丢失，选 7 修复)' }
+        else { Write-Host '账号认证       : auth.json 仅含 API Key (官方登录态丢失，切回官方需选 7)' }
+        $nBackups = @(Get-ChildItem (Join-Path $codexHome 'backups') -Directory -Filter 'codex-plus-live-*' -ErrorAction SilentlyContinue).Count
+        if ($nBackups -gt 0) { Write-Host "codex++ 备份   : $nBackups 份 (选 7 可从备份恢复官方登录)" }
+    }
     elseif (Test-Path $disabled) {
         $bk = if (Test-Path $backup) { '，官方登录有备份' } else { '' }
         Write-Host "账号认证       : 已停用 (API Key 模式$bk)"
@@ -224,6 +233,98 @@ function Invoke-LegacyProviderFix {
     Write-Host '  - 打开后可查看/导出历史；续聊请求会经 cc-switch 代理转发到当前激活的供应商，'
     Write-Host '    若当前是官方模式，旧对话续聊需在 cc-switch 中切回对应第三方供应商。'
     Write-Host '  - 注意: cc-switch 每次切换供应商都会重写 config.toml，切换后需重跑本项。'
+}
+
+# ---------- 问题 8: auth.json 被供应商切换工具清空 ----------
+# codex++ / cc-switch 等切换工具切回"官方登录"供应商时，可能把 ~/.codex/auth.json
+# 覆写为 {} (或仅剩 OPENAI_API_KEY)，官方 ChatGPT 登录 token 丢失，
+# 桌面版启动即报 "未能加载账户信息。请检查网络连接后重试。" (提示有误导性，实为凭据丢失)。
+# 修复: 从切换工具的备份目录 (~/.codex/backups/codex-plus-live-*/auth.json) 中
+#       找到最近一份含官方登录 tokens 的备份恢复。全程不显示 token 内容。
+
+function Get-AuthJsonInfo($p) {
+    $info = @{ Exists = (Test-Path $p); HasTokens = $false; Mode = $null; Size = 0; LastRefresh = $null; IsEmpty = $false }
+    if (-not $info.Exists) { return $info }
+    $info.Size = (Get-Item $p).Length
+    try {
+        $j = Read-Raw $p | ConvertFrom-Json
+        $info.Mode = $j.auth_mode
+        $info.HasTokens = ($null -ne $j.tokens -and $null -ne $j.tokens.refresh_token)
+        $info.LastRefresh = $j.last_refresh
+        $info.IsEmpty = ($j.PSObject.Properties.Name.Count -eq 0)
+    } catch { if ($info.Size -le 5) { $info.IsEmpty = $true } }
+    $info
+}
+
+function Get-AuthJsonBackups {
+    # 兼容 codex++ (codex-plus-live-*) 与 cc-switch (cc-switch-*) 两类备份目录
+    $dir = Join-Path $codexHome 'backups'
+    Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'codex-plus-live-*' -or $_.Name -like 'cc-switch-*' } |
+        ForEach-Object {
+            $a = Join-Path $_.FullName 'auth.json'
+            if (Test-Path $a) {
+                $info = Get-AuthJsonInfo $a
+                [pscustomobject]@{ Time = $_.LastWriteTime; Path = $a; HasTokens = $info.HasTokens; Size = $info.Size }
+            }
+        } | Sort-Object Time -Descending
+}
+
+function Invoke-AuthRestoreFix {
+    $authJson = Join-Path $codexHome 'auth.json'
+    $cur = Get-AuthJsonInfo $authJson
+
+    if ($cur.HasTokens) {
+        Write-Host '[通过] auth.json 含完整官方登录态 (刷新时间: '($cur.LastRefresh -replace '\.\d+', '')')，无需修复。'
+        return
+    }
+
+    Write-Host '[检查] auth.json 当前状态:'
+    if ($cur.Exists) {
+        if ($cur.IsEmpty) { Write-Host '  - 文件为空对象 {}，官方登录已被切换工具清空' }
+        elseif ($cur.Mode -eq 'chatgpt') { Write-Host '  - auth_mode=chatgpt 但缺少 tokens，登录态不完整' }
+        else { Write-Host '  - 仅含 API Key (' $cur.Size '字节)，官方登录 token 丢失' }
+    } else { Write-Host '  - auth.json 不存在' }
+
+    Write-Host '[检查] 正在扫描切换工具的备份目录 (backups/codex-plus-live-*、backups/cc-switch-*)...'
+    $cands = @(Get-AuthJsonBackups)
+    if (-not $cands) {
+        Write-Host '[失败] 未找到任何含 auth.json 的备份，需重新进行官方登录。'
+        Pause-It
+        return
+    }
+
+    Write-Host '  可用备份 (按时间倒序):'
+    foreach ($c in $cands) {
+        $tag = if ($c.HasTokens) { '官方登录态 (可恢复)' } else { 'API Key / 空文件' }
+        Write-Host ('  - {0}  {1,6} 字节  {2}' -f $c.Time.ToString('yyyy-MM-dd HH:mm:ss'), $c.Size, $tag)
+    }
+
+    $best = $cands | Where-Object { $_.HasTokens } | Select-Object -First 1
+    if (-not $best) {
+        Write-Host '[失败] 所有备份均无官方登录 tokens，需重新进行官方登录 (备份仅含 API Key)。'
+        Pause-It
+        return
+    }
+
+    $confirm = Read-Host ('将从 {0} 的备份恢复官方登录态，确认? (回车确认 / 输入 n 取消)' -f $best.Time.ToString('yyyy-MM-dd HH:mm:ss'))
+    if ($confirm -eq 'n') { Write-Host '已取消。'; return }
+
+    if ($cur.Exists) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $broken = Join-Path $codexHome ("auth.json.broken-$stamp.bak")
+        Copy-Item $authJson $broken -Force
+        Write-Host "已留存现场: auth.json.broken-$stamp.bak"
+    }
+    Copy-Item $best.Path $authJson -Force
+    $ok = (Get-AuthJsonInfo $authJson).HasTokens
+    if ($ok) {
+        Write-Host '[完成] 已从备份恢复官方登录态。'
+        Write-Host '后续步骤: 完全退出 ChatGPT/Codex (含托盘) 后重新打开；若提示过期会自动续期，'
+        Write-Host '否则重新登录一次即可。建议关闭切换工具的"启用供应商配置切换"开关防止再次覆写。'
+    } else {
+        Write-Host '[错误] 恢复后校验未通过，请手动检查 auth.json。'
+    }
 }
 
 # ---------- 问题 6: Agent 沙盒 ----------
@@ -292,8 +393,9 @@ do {
     Write-Host '  [4] 自定义上下文窗口 (默认 256k，报"使用上限"时调小)'
     Write-Host '  [5] 修复 Agent 沙盒   -- 提示"更新 Agent 沙盒以继续/无法发送"时用'
     Write-Host '  [6] 修复旧对话打不开 -- 提示 "Model provider xxx not found" 时用'
-    Write-Host '  [7] 刷新状态'
-    Write-Host '  [8] 退出'
+    Write-Host '  [7] 恢复官方登录     -- 切回官方后 ChatGPT 报"未能加载账户信息"时用'
+    Write-Host '  [8] 刷新状态'
+    Write-Host '  [9] 退出'
     Write-Host ''
     Write-Host ' ! 重要: 会话绑定模型，切走即失效 -- 官方模型的旧对话切国产后无法续用，'
     Write-Host '          请开新对话 (需旧上下文就手动贴关键内容)。详见《Codex修复说明.md》'
@@ -327,8 +429,9 @@ do {
             if (-not $id) { $id = 'custom' }
             Invoke-LegacyProviderFix $id; Pause-It
         }
-        '7' { }
-        '8' { exit }
+        '7' { Invoke-AuthRestoreFix; Pause-It }
+        '8' { }
+        '9' { exit }
         default { Write-Host '无效输入'; Pause-It }
     }
 } while ($true)
